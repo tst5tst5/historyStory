@@ -71,7 +71,7 @@ export default function BookmarkPanel({ onClose }: BookmarkPanelProps) {
 
   const formatYear = (year: number) => {
     if (year < 0) return `公元前${Math.abs(year)}年`
-    return `${year}年`
+    return `公元${year}年`
   }
 
   return (

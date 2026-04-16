@@ -41,7 +41,7 @@ export default function SearchModal({ onClose }: SearchModalProps) {
 
   const formatYear = (year: number) => {
     if (year < 0) return `公元前${Math.abs(year)}年`
-    return `${year}年`
+    return `公元${year}年`
   }
 
   const highlightText = (text: string) => {

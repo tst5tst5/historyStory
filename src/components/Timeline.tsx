@@ -58,6 +58,8 @@ export default function Timeline() {
   const [hoveredDynastyId, setHoveredDynastyId] = useState<string | null>(null)
   const [dynastyHoverPos, setDynastyHoverPos] = useState({ pageX: 0, pageY: 0 })
   const [isMouseOnBand, setIsMouseOnBand] = useState(false)
+  // Track mouse X relative to band container for tooltip positioning
+  const [bandMouseX, setBandMouseX] = useState(0)
 
   // === Country row vertical drag-reorder state ===
   const [countryDragId, setCountryDragId] = useState<string | null>(null)
@@ -66,6 +68,24 @@ export default function Timeline() {
   const [customCountryOrder, setCustomCountryOrder] = useState<Record<string, number>>(() => {
     try { return JSON.parse(localStorage.getItem('timeline-country-order') || '{}') } catch { return {} }
   })
+
+  // === Country collapse state — checkbox controls whether to show event labels ===
+  const [collapsedCountries, setCollapsedCountries] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('timeline-collapsed') || '[]')) } catch { return new Set() }
+  })
+  const toggleCollapse = useCallback((countryId: string) => {
+    setCollapsedCountries((prev) => {
+      const next = new Set(prev)
+      if (next.has(countryId)) next.delete(countryId)
+      else next.add(countryId)
+      try { localStorage.setItem('timeline-collapsed', JSON.stringify([...next])) } catch {}
+      return next
+    })
+  }, [])
+
+  // === Zoom transition lock — prevent label flying during zoom ===
+  const isZoomingRef = useRef(false)
+  const zoomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // === Sync left column scroll with right container ===
   useEffect(() => {
@@ -106,30 +126,6 @@ export default function Timeline() {
     rightContainerRef.current.style.userSelect = ''
   }, [])
 
-  // === Wheel: on band → zoom only; off band → native vertical scroll ===
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    if (isMouseOnBand) {
-      // On band: ALWAYS prevent default (no vertical scroll), only zoom
-      e.preventDefault()
-      const container = rightContainerRef.current
-      if (!container) return
-      const rect = container.getBoundingClientRect()
-      const mouseX = e.clientX - rect.left + container.scrollLeft
-      const delta = e.deltaY > 0 ? -0.1 : 0.1
-      const newZoom = Math.max(ZOOM_LEVELS.min, Math.min(ZOOM_LEVELS.max, zoom + delta))
-      const timeAtMouse = timeRange.min + mouseX / yearWidth
-      const baseYearWidth = 2
-      const newYearWidth = baseYearWidth * newZoom
-      const newMouseX = (timeAtMouse - timeRange.min) * newYearWidth
-      const newScrollLeft = newMouseX - (e.clientX - rect.left)
-      setZoom(newZoom)
-      requestAnimationFrame(() => {
-        if (container) container.scrollLeft = Math.max(0, newScrollLeft)
-      })
-    }
-    // Off band: do NOT call preventDefault → browser naturally scrolls vertically
-  }, [isMouseOnBand, zoom])
-
   const resetZoom = useCallback(() => {
     setZoom(1)
     if (rightContainerRef.current) rightContainerRef.current.scrollLeft = 0
@@ -153,8 +149,8 @@ export default function Timeline() {
   }, [])
   const handleEventClick = useCallback((event: any) => setShowDetail(event), [])
 
-  const formatYear = (y: number) => y < 0 ? `公元前${Math.abs(y)}年` : `${y}年`
-  const formatYearShort = (y: number) => y < 0 ? `${Math.abs(y)}BC` : `${y}`
+  const formatYear = (y: number) => y < 0 ? `公元前${Math.abs(y)}年` : `公元${y}年`
+  const formatYearShort = (y: number) => y < 0 ? `公元前${Math.abs(y)}` : `公元${y}`
   const getCategory = (cid: string) => eventCategories.find((c) => c.id === cid)
 
   // === Computed data ===
@@ -265,13 +261,44 @@ export default function Timeline() {
     }
   }, [filteredEvents, selectedCountries])
 
+  // === These must be defined BEFORE handleWheel (which references them) ===
   const baseYearWidth = 2
   const yearWidth = baseYearWidth * zoom
   const timelineWidth = Math.abs(timeRange.max - timeRange.min) * yearWidth
   const getEventPosition = (year: number) => (year - timeRange.min) * yearWidth
   const getCountryDynasties = (cid: string) => allDynasties.filter((d) => d.countryId === cid)
 
-  // Layout constants
+  // === Wheel: on band → zoom anchored at mouse; off band → native vertical scroll ===
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    if (isMouseOnBand) {
+      e.preventDefault()
+      const container = rightContainerRef.current
+      if (!container) return
+
+      // Lock transitions during zoom — prevents "flying" labels
+      isZoomingRef.current = true
+      if (zoomTimerRef.current) clearTimeout(zoomTimerRef.current)
+      zoomTimerRef.current = setTimeout(() => { isZoomingRef.current = false }, 150)
+
+      const rect = container.getBoundingClientRect()
+      const mouseX = e.clientX - rect.left + container.scrollLeft
+      const delta = e.deltaY > 0 ? -0.1 : 0.1
+
+      // Compute new zoom clamped to range
+      const newZoom = Math.max(ZOOM_LEVELS.min, Math.min(ZOOM_LEVELS.max, zoom + delta))
+
+      // Compute scroll position so time under mouse cursor stays visually fixed
+      const timeAtMouse = timeRange.min + mouseX / yearWidth
+      const newYearWidth = baseYearWidth * newZoom
+      const newMouseX = (timeAtMouse - timeRange.min) * newYearWidth
+      const newScrollLeft = Math.max(0, newMouseX - (e.clientX - rect.left))
+
+      // Update React state AND scroll position synchronously in the same frame
+      setZoom(newZoom)
+      container.scrollLeft = newScrollLeft
+    }
+    // Off band: do NOT call preventDefault → browser naturally scrolls vertically
+  }, [isMouseOnBand, zoom, timeRange, yearWidth])
   const bandHeight = 28
   const labelRowHeight = 26
   const extraGap = 12
@@ -405,6 +432,7 @@ export default function Timeline() {
           const layout = countryLayoutsMap[country.id]
           if (!layout) return null
           const isDragging = countryDragId === country.id
+          const isCollapsed = collapsedCountries.has(country.id)
           return (
             <div
               key={country.id}
@@ -414,28 +442,43 @@ export default function Timeline() {
                 transform: isDragging ? `translateY(${countryDragCurrentY}px)` : undefined,
                 opacity: isDragging ? 0.6 : 1,
                 zIndex: isDragging ? 50 : 1,
-                transition: isDragging ? 'none' : 'transform 0.15s ease, opacity 0.15s ease',
+                transition: isZoomingRef.current || isDragging ? 'none' : 'transform 0.15s ease, opacity 0.15s ease',
                 // 拖拽时的插入指示线
                 borderTop: (countryDragId && !isDragging && visualIndex > 0 && orderedCountries[visualIndex - 1]?.id === countryDragId)
                   ? '2px solid #D4AF37'
                   : undefined,
               }}
             >
-              {/* Country name label — aligned to match band vertical position */}
+              {/* Country name label — aligned to match band vertical position, with checkbox */}
               <div
-                className="absolute inset-x-0 top-0 flex items-center justify-center"
+                className="absolute inset-x-0 top-0 flex items-center justify-center gap-1"
                 style={{ height: bandHeight }}
               >
+                {/* Country name label — left side */}
                 <span
                   className={`px-3 py-0.5 rounded text-xs font-medium whitespace-nowrap cursor-grab active:cursor-grabbing select-none ${
                     isDark ? 'bg-dark-200/95 text-parchment-100' : 'bg-white/95 text-dark-100'
-                  } border border-gold-400/30 shadow-lg hover:border-gold-400/60 transition-colors`}
-                  style={{ height: 24, display: 'flex', alignItems: 'center' }}
+                  } ${isCollapsed ? 'opacity-60 border-dashed' : ''} border border-gold-400/30 shadow-lg hover:border-gold-400/60 transition-colors`}
+                  style={{ height: 24, display: 'flex', alignItems: 'center', minWidth: 50 }}
                   onMouseDown={(e) => handleCountryDragStart(country.id, e)}
-                  title="上下拖动调整顺序"
+                  title={`上下拖动调整顺序${isCollapsed ? '\n(已收起，勾选恢复详情)' : ''}`}
                 >
                   {country.name}{country.isDefunct && <span className="ml-0.5 text-[10px] opacity-70" title="已灭亡">（-）</span>}
                 </span>
+                {/* Checkbox for collapse/expand — right side */}
+                <input
+                  type="checkbox"
+                  checked={!isCollapsed}
+                  onChange={(e) => {
+                    e.stopPropagation()
+                    toggleCollapse(country.id)
+                  }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  title={isCollapsed ? '显示事件详情' : '隐藏事件详情（仅显示点）'}
+                  className="cursor-pointer accent-amber-500 flex-shrink-0"
+                  style={{ width: 13, height: 13 }}
+                  onClick={(e) => e.stopPropagation()}
+                />
               </div>
             </div>
           )
@@ -505,6 +548,7 @@ export default function Timeline() {
             const layout = countryLayoutsMap[country.id]
             if (!layout) return null
             const { dynastyPositions, eventLayouts, labelAreaHeight, totalHeight } = layout
+            const isCollapsed = collapsedCountries.has(country.id)
 
             return (
               <div
@@ -515,7 +559,7 @@ export default function Timeline() {
                   transform: countryDragId === country.id ? `translateY(${countryDragCurrentY}px)` : undefined,
                   opacity: countryDragId === country.id ? 0.6 : 1,
                   zIndex: countryDragId === country.id ? 50 : 1,
-                  transition: countryDragId === country.id ? 'none' : 'transform 0.15s ease, opacity 0.15s ease',
+                  transition: isZoomingRef.current || (countryDragId === country.id) ? 'none' : 'transform 0.15s ease, opacity 0.15s ease',
                 }}
               >
 
@@ -524,7 +568,7 @@ export default function Timeline() {
                   className="absolute"
                   style={{ top: 0, left: 0, width: '100%', height: bandHeight }}
                   onMouseEnter={() => setIsMouseOnBand(true)}
-                  onMouseLeave={() => setIsMouseOnBand(false)}
+                  onMouseLeave={() => { setIsMouseOnBand(false); setBandMouseX(0) }}
                   data-band-area="true"
                 >
                   {/* 上边界细线 — 延伸到最左侧，辅助对应国家名称 */}
@@ -546,7 +590,7 @@ export default function Timeline() {
                     return (
                       <div
                         key={dynasty.id}
-                        className="absolute top-0 h-full rounded transition-all duration-300 ease-out"
+                        className={`absolute top-0 h-full rounded ${isZoomingRef.current ? '' : 'transition-all duration-300 ease-out'}`}
                         style={{
                           left: sx,
                           width: Math.max(w, 2),
@@ -557,15 +601,15 @@ export default function Timeline() {
                             ? `0 4px 20px ${bg}80, 0 0 40px ${bg}20`
                             : `0 1px 4px ${bg}30`,
                         }}
-                        onMouseEnter={(e) => { setHoveredDynastyId(dynasty.id); setDynastyHoverPos({ pageX: e.pageX, pageY: e.pageY }) }}
-                        onMouseMove={(e) => setDynastyHoverPos({ pageX: e.pageX, pageY: e.pageY })}
+                        onMouseEnter={(e) => { setHoveredDynastyId(dynasty.id); setBandMouseX(e.nativeEvent.offsetX) }}
+                        onMouseMove={(e) => setBandMouseX(e.nativeEvent.offsetX)}
                         onMouseLeave={() => setHoveredDynastyId(null)}
                       >
 
                         {/* Shimmer effect */}
                         <div className="absolute inset-0 overflow-hidden pointer-events-none">
                           <div
-                            className={`absolute inset-y-0 w-16 transition-opacity duration-300 ${isDyHov ? 'opacity-100' : 'opacity-0'}`}
+                            className={`absolute inset-y-0 w-16 ${isZoomingRef.current ? '' : 'transition-opacity duration-300'} ${isDyHov ? 'opacity-100' : 'opacity-0'}`}
                             style={{
                               background: `linear-gradient(90deg, transparent, ${bg}50, ${bg}80, ${bg}50, transparent)`,
                               animation: isDyHov ? 'shimmer 1.8s ease-in-out infinite' : undefined,
@@ -596,14 +640,14 @@ export default function Timeline() {
                         )}
 
                         {/* Top highlight gradient */}
-                        <div className="absolute left-0 right-0 transition-opacity duration-300 pointer-events-none" style={{
+                        <div className={`absolute left-0 right-0 pointer-events-none ${isZoomingRef.current ? '' : 'transition-opacity duration-300'}`} style={{
                           top: 0, height: '35%',
                           background: `linear-gradient(180deg, rgba(255,255,255,${isDyHov ? (isDark ? '0.18' : '0.28') : (isDark ? '0.06' : '0.12')}), transparent)`,
                           borderRadius: '3px 3px 0 0',
                         }} />
 
                         {/* Bottom glow line */}
-                        <div className="absolute left-0 right-0 transition-all duration-300 pointer-events-none" style={{
+                        <div className={`absolute left-0 right-0 pointer-events-none ${isZoomingRef.current ? '' : 'transition-all duration-300'}`} style={{
                           bottom: 0, height: isDyHov ? 2 : 1,
                           background: `linear-gradient(90deg, transparent, ${bg}, transparent)`,
                           opacity: isDyHov ? 1 : 0.4,
@@ -621,7 +665,7 @@ export default function Timeline() {
                               return (
                                 <span
                                   key={`dn-${dynasty.id}-${idx}`}
-                                  className={`absolute px-1 whitespace-nowrap transition-all duration-300 ${isDyHov ? 'text-[12px] font-bold' : 'text-[10px] font-semibold'}`}
+                                  className={`absolute px-1 whitespace-nowrap ${isZoomingRef.current ? '' : 'transition-all duration-300'} ${isDyHov ? 'text-[12px] font-bold' : 'text-[10px] font-semibold'}`}
                                   style={{
                                     left: clampedL,
                                     top: '50%',
@@ -639,16 +683,19 @@ export default function Timeline() {
                             })}
                         </div>
 
-                        {/* Dynasty hover tooltip — 显示在色带下方，可交互 */}
+                        {/* Dynasty hover tooltip — 紧贴色带底部下方，跟随鼠标水平位置 */}
                         {isDyHov && (
-                          <div className="fixed z-[1002]" style={{
-                            left: Math.min(dynastyHoverPos.pageX + 12, window.innerWidth - 220),
-                            top: dynastyHoverPos.pageY + 18,
+                          <div className="absolute z-[1002] whitespace-nowrap" style={{
+                            left: Math.max(10, Math.min(w - 10, bandMouseX)),
+                            top: '100%',
+                            marginTop: 4,
+                            transform: 'translateX(-50%)',
+                            pointerEvents: 'auto',
                           }}
                           onClick={(e) => e.stopPropagation()}
                           onMouseEnter={() => setHoveredDynastyId(dynasty.id)}
                           onMouseLeave={() => setHoveredDynastyId(null)}>
-                            <div className="px-2.5 py-1.5 rounded-lg shadow-xl border text-xs whitespace-nowrap backdrop-blur-md transition-opacity duration-150" style={{
+                            <div className={`px-2.5 py-1.5 rounded-lg shadow-xl border text-xs backdrop-blur-md ${isZoomingRef.current ? '' : 'transition-opacity duration-150'}`} style={{
                               backgroundColor: isDark ? '#1a1a2eee' : '#ffffffee',
                               borderColor: bg + '70',
                               color: isDark ? '#F5F5DC' : '#1a1a1a',
@@ -680,7 +727,7 @@ export default function Timeline() {
                     return (
                       <div
                         key={evt.id}
-                        className="absolute cursor-pointer transition-transform duration-150"
+                        className="absolute cursor-pointer"
                         style={{ left: ex, top: bandHeight + 2, transform: `translate(-50%, 0) ${evtHov ? 'scale(1.5)' : 'scale(1)'}`, zIndex: evtHov ? 100 : 15 }}
                         onMouseEnter={(e) => handleEventHover(evt.id, e)}
                         onMouseLeave={handleEventLeave}
@@ -692,8 +739,8 @@ export default function Timeline() {
                   })}
                 </div>
 
-                {/* Event labels area */}
-                {showEventLabels && eventLayouts.length > 0 && labelAreaHeight > 0 && (
+                {/* Event labels area — hidden when country is collapsed */}
+                {showEventLabels && eventLayouts.length > 0 && labelAreaHeight > 0 && !isCollapsed && (
                   <div className="absolute" style={{ top: bandHeight + eventDotSize + dotToLabelGap + 2, left: 0, width: '100%', height: labelAreaHeight }}>
                     {cDynasties.map((dynasty) => (
                       <div key={`ln-${dynasty.id}`} className="absolute top-0 bottom-0 w-px" style={{ left: getEventPosition(dynasty.startYear), backgroundColor: dynasty.color + '25' }} />
@@ -705,13 +752,13 @@ export default function Timeline() {
                       return (
                         <div
                           key={event.id}
-                          className="absolute cursor-pointer transition-all duration-150"
+                          className="absolute cursor-pointer"
                           style={{ left: x, top: row * labelRowHeight + 2, transform: `translate(-50%, 0) ${evtHov ? 'scale(1.05)' : 'scale(1)'}`, zIndex: evtHov ? 100 : 5 }}
                           onMouseEnter={(e) => handleEventHover(event.id, e)}
                           onMouseLeave={handleEventLeave}
                           onClick={() => handleEventClick(event)}
                         >
-                          <div className={`flex items-center gap-1 px-2 py-1 rounded-[4px] text-[11px] whitespace-nowrap ${isDark ? 'bg-dark-200/90' : 'bg-white/90'} shadow-sm transition-opacity`} style={{ borderColor: cat?.color + '50', opacity: evtHov ? 1 : showFullEventLabels ? 0.95 : 0.75 }}>
+                          <div className={`flex items-center gap-1 px-2 py-1 rounded-[4px] text-[11px] whitespace-nowrap ${isDark ? 'bg-dark-200/90' : 'bg-white/90'} shadow-sm ${isZoomingRef.current ? '' : 'transition-opacity'}`} style={{ borderColor: cat?.color + '50', opacity: evtHov ? 1 : showFullEventLabels ? 0.95 : 0.75 }}>
                             <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: cat?.color }} />
                             <span className="font-mono text-[10px] opacity-75">{formatYearShort(event.year)}</span>
                             <span className="font-medium truncate" style={{ maxWidth: zoom > 0.7 ? 100 : 60 }}>{event.summary}</span>
