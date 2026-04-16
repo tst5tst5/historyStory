@@ -65,6 +65,7 @@ export interface SelectedCountry {
   countryName: string
   continentId: string
   color?: string
+  isDefunct?: boolean
 }
 
 export interface Bookmark {

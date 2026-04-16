@@ -74,6 +74,7 @@ export default function AddRegionModal({ onClose }: AddRegionModalProps) {
             countryId: country.id,
             countryName: country.name,
             continentId: continent.id,
+            isDefunct: country.isDefunct || false,
           })
           break
         }
@@ -198,7 +199,7 @@ export default function AddRegionModal({ onClose }: AddRegionModalProps) {
                     }`}>
                       {(alreadyAdded || isPending) && <Check className="w-3 h-3" />}
                     </div>
-                    <span>{country.name}</span>
+                    <span>{country.name}{country.isDefunct ? '（-）' : ''}</span>
                     {alreadyAdded && <span className="ml-auto text-[10px] opacity-60">已添加</span>}
                   </button>
                 )

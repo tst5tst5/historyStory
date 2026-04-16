@@ -5,6 +5,7 @@ import { useCategories } from '../context/CategoryContext'
 import { events } from '../data/events'
 import { allDynasties } from '../data/dynasties'
 import { eventCategories } from '../data/categories'
+import { continents } from '../data/continents'
 import { Bookmark, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react'
 
 const BOOKMARKS_KEY = 'history_bookmarks'
@@ -14,6 +15,15 @@ function getBookmarks(): string[] {
 }
 function saveBookmarks(ids: string[]) {
   localStorage.setItem(BOOKMARKS_KEY, JSON.stringify(ids))
+}
+
+const getContrastText = (hexColor: string): string => {
+  // 根据背景色亮度返回高对比度文字色（亮底→深字，暗底→白字）
+  const r = parseInt(hexColor.slice(1, 3), 16)
+  const g = parseInt(hexColor.slice(3, 5), 16)
+  const b = parseInt(hexColor.slice(5, 7), 16)
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+  return luminance > 0.52 ? '#1a1a1a' : '#ffffff'
 }
 
 const getCountryColor = (countryId: string): string => {
@@ -48,6 +58,14 @@ export default function Timeline() {
   const [hoveredDynastyId, setHoveredDynastyId] = useState<string | null>(null)
   const [dynastyHoverPos, setDynastyHoverPos] = useState({ pageX: 0, pageY: 0 })
   const [isMouseOnBand, setIsMouseOnBand] = useState(false)
+
+  // === Country row vertical drag-reorder state ===
+  const [countryDragId, setCountryDragId] = useState<string | null>(null)
+  const [countryDragStartY, setCountryDragStartY] = useState(0)
+  const [countryDragCurrentY, setCountryDragCurrentY] = useState(0)
+  const [customCountryOrder, setCustomCountryOrder] = useState<Record<string, number>>(() => {
+    try { return JSON.parse(localStorage.getItem('timeline-country-order') || '{}') } catch { return {} }
+  })
 
   // === Sync left column scroll with right container ===
   useEffect(() => {
@@ -129,7 +147,10 @@ export default function Timeline() {
     setHoveredEvent(eventId)
     setHoverPosition({ pageX: e.pageX, pageY: e.pageY })
   }, [])
-  const handleEventLeave = useCallback(() => setHoveredEvent(null), [])
+  const handleEventLeave = useCallback(() => {
+    // 鼠标离开事件，立即隐藏弹窗
+    setHoveredEvent(null)
+  }, [])
   const handleEventClick = useCallback((event: any) => setShowDetail(event), [])
 
   const formatYear = (y: number) => y < 0 ? `公元前${Math.abs(y)}年` : `${y}年`
@@ -137,22 +158,88 @@ export default function Timeline() {
   const getCategory = (cid: string) => eventCategories.find((c) => c.id === cid)
 
   // === Computed data ===
+  // 从continents主数据构建国家ID→isDefunct映射（确保即使localStorage旧数据也能正确标记）
+  const continentCountryMap = useMemo(() => {
+    const map = new Map<string, { isDefunct?: boolean }>()
+    continents.forEach((cont) => {
+      cont.countries.forEach((c) => map.set(c.id, { isDefunct: c.isDefunct }))
+    })
+    return map
+  }, [])
+
   const selectedCountries = useMemo(() => {
     const countryIds = getSelectedCountryIds()
-    const result: { id: string; name: string; color: string }[] = []
+    const result: { id: string; name: string; color: string; isDefunct?: boolean }[] = []
     selectedRegions.forEach((region) => {
       region.countries.forEach((country) => {
         if (countryIds.includes(country.countryId)) {
+          // 优先使用localStorage中的isDefunct，否则从continents主数据回填
+          const sourceData = continentCountryMap.get(country.countryId)
           result.push({
             id: country.countryId,
             name: country.countryName,
             color: getCountryColor(country.countryId),
+            isDefunct: country.isDefunct ?? sourceData?.isDefunct,
           })
         }
       })
     })
     return result
-  }, [selectedRegions, getSelectedCountryIds])
+  }, [selectedRegions, getSelectedCountryIds, continentCountryMap])
+
+  // === Country row drag-reorder ===
+  // 按自定义排序顺序排列的国家列表
+  const orderedCountries = useMemo(() => {
+    return [...selectedCountries].sort((a, b) => {
+      const orderA = customCountryOrder[a.id] ?? Infinity
+      const orderB = customCountryOrder[b.id] ?? Infinity
+      return orderA - orderB
+    })
+  }, [selectedCountries, customCountryOrder])
+
+  const handleCountryDragStart = useCallback((countryId: string, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setCountryDragId(countryId)
+    setCountryDragStartY(e.pageY)
+    setCountryDragCurrentY(0)
+  }, [])
+
+  const handleCountryDragMove = useCallback((e: React.MouseEvent) => {
+    if (!countryDragId) return
+    setCountryDragCurrentY(e.pageY - countryDragStartY)
+  }, [countryDragId, countryDragStartY])
+
+  const handleCountryDragEnd = useCallback(() => {
+    if (!countryDragId) return
+    // 根据当前偏移量计算新的排序位置
+    const currentIdx = orderedCountries.findIndex(c => c.id === countryDragId)
+    if (currentIdx < 0) { setCountryDragId(null); return }
+
+    // 计算目标位置：每移动约 totalHeight/2 算一行
+    const avgHeight = 100 // 近似每行高度
+    const offsetRows = Math.round(countryDragCurrentY / avgHeight)
+    let newIdx = Math.max(0, Math.min(orderedCountries.length - 1, currentIdx + offsetRows))
+
+    if (newIdx !== currentIdx) {
+      // 更新顺序
+      const newOrder = { ...customCountryOrder }
+      orderedCountries.forEach((c, i) => {
+        if (i === newIdx) newOrder[countryDragId] = i
+        else if (i < newIdx && c.id !== countryDragId && (customCountryOrder[c.id] ?? i) >= newOrder[countryDragId]) newOrder[c.id] = (customCountryOrder[c.id] ?? i) + 1
+        else if (i > newIdx && c.id !== countryDragId && (customCountryOrder[c.id] ?? i) <= newOrder[countryDragId]) newOrder[c.id] = (customCountryOrder[c.id] ?? i) - 1
+        else if (c.id !== countryDragId && !(customCountryOrder[c.id] != null)) newOrder[c.id] = i > newIdx ? i + 1 : i
+      })
+      setCustomCountryOrder(newOrder)
+      try { localStorage.setItem('timeline-country-order', JSON.stringify(newOrder)) } catch {}
+    }
+
+    // 拖拽结束后缩放到25%
+    setZoom(0.25)
+
+    setCountryDragId(null)
+    setCountryDragCurrentY(0)
+  }, [countryDragId, countryDragCurrentY, orderedCountries, customCountryOrder, setZoom])
 
   const filteredEvents = useMemo(() => {
     const countryIds = new Set(selectedCountries.map((c) => c.id))
@@ -186,10 +273,10 @@ export default function Timeline() {
 
   // Layout constants
   const bandHeight = 28
-  const labelRowHeight = 22
-  const extraGap = 10
+  const labelRowHeight = 26
+  const extraGap = 12
   const eventDotSize = 7
-  const dotToLabelGap = 6
+  const dotToLabelGap = 8
   const frozenColWidth = 115
 
   // Visibility thresholds
@@ -199,7 +286,7 @@ export default function Timeline() {
   const showFullEventLabels = zoom >= 0.6
   const dynastyMinDisplayWidth = Math.max(30, 50 / zoom)
   const dynastyRepeatInterval = Math.max(80, 140 / zoom)
-  const maxLabelRows = zoom < 0.5 ? 10 : zoom < 0.8 ? 8 : zoom < 1.2 ? 6 : 5
+  const maxLabelRows = zoom < 0.5 ? 14 : zoom < 0.8 ? 10 : zoom < 1.2 ? 8 : 6
 
   // Compute dynasty label positions
   const computeDynastyLabelPositions = useCallback((dynasties: any[]) => {
@@ -238,7 +325,7 @@ export default function Timeline() {
     const layouts: { event: any; x: number; row: number }[] = []
     const rows: number[][] = []
     const sortedEvents = [...countryEvents].sort((a, b) => a.year - b.year)
-    const estW = Math.max(100, 120 * (zoom > 1 ? zoom / 2 : 1))
+    const estW = Math.max(140, 160 * (zoom > 1 ? zoom / 2 : 1))
     sortedEvents.forEach((event) => {
       const x = getEventPosition(event.year)
       let assignedRow = 0
@@ -292,6 +379,9 @@ export default function Timeline() {
           isDark ? 'bg-gradient-to-b from-dark-200 to-dark-300' : 'bg-gradient-to-b from-parchment-200 to-parchment-300'
         }`}
         style={{ width: frozenColWidth }}
+        onMouseMove={handleCountryDragMove}
+        onMouseUp={handleCountryDragEnd}
+        onMouseLeave={() => { if (countryDragId) handleCountryDragEnd() }}
       >
         {/* Zoom controls — absolute overlay, doesn't affect flow layout */}
         <div className={`absolute top-0 right-0 z-20 m-2 flex items-center gap-1 p-1 rounded-lg transition-opacity duration-200 ${isDark ? 'bg-dark-100/50 hover:bg-dark-100/95' : 'bg-white/40 hover:bg-white/95'} border border-gold-400/20 backdrop-blur-sm`}>
@@ -310,21 +400,41 @@ export default function Timeline() {
         {/* Time ruler placeholder (matches right side ruler height) */}
         <div className="h-8 border-b border-gold-400/20" />
 
-        {/* Country name rows — vertically align with band area */}
-        {selectedCountries.map((country) => {
+        {/* Country name rows — vertically align with band area, supports drag-reorder */}
+        {orderedCountries.map((country, visualIndex) => {
           const layout = countryLayoutsMap[country.id]
           if (!layout) return null
+          const isDragging = countryDragId === country.id
           return (
-            <div key={country.id} className="relative" style={{ height: layout.totalHeight }}>
+            <div
+              key={country.id}
+              className="relative"
+              style={{
+                height: layout.totalHeight,
+                transform: isDragging ? `translateY(${countryDragCurrentY}px)` : undefined,
+                opacity: isDragging ? 0.6 : 1,
+                zIndex: isDragging ? 50 : 1,
+                transition: isDragging ? 'none' : 'transform 0.15s ease, opacity 0.15s ease',
+                // 拖拽时的插入指示线
+                borderTop: (countryDragId && !isDragging && visualIndex > 0 && orderedCountries[visualIndex - 1]?.id === countryDragId)
+                  ? '2px solid #D4AF37'
+                  : undefined,
+              }}
+            >
               {/* Country name label — aligned to match band vertical position */}
-              <div className="absolute inset-x-0 top-0 flex items-center justify-center" style={{ height: bandHeight }}>
+              <div
+                className="absolute inset-x-0 top-0 flex items-center justify-center"
+                style={{ height: bandHeight }}
+              >
                 <span
-                  className={`px-3 py-0.5 rounded text-xs font-medium whitespace-nowrap ${
+                  className={`px-3 py-0.5 rounded text-xs font-medium whitespace-nowrap cursor-grab active:cursor-grabbing select-none ${
                     isDark ? 'bg-dark-200/95 text-parchment-100' : 'bg-white/95 text-dark-100'
-                  } border border-gold-400/30 shadow-lg`}
+                  } border border-gold-400/30 shadow-lg hover:border-gold-400/60 transition-colors`}
                   style={{ height: 24, display: 'flex', alignItems: 'center' }}
+                  onMouseDown={(e) => handleCountryDragStart(country.id, e)}
+                  title="上下拖动调整顺序"
                 >
-                  {country.name}{country.isDefunct && <span className="ml-0.5 text-[10px] opacity-60" title="已灭亡">†</span>}
+                  {country.name}{country.isDefunct && <span className="ml-0.5 text-[10px] opacity-70" title="已灭亡">（-）</span>}
                 </span>
               </div>
             </div>
@@ -335,7 +445,7 @@ export default function Timeline() {
         <div className={`absolute bottom-0 left-0 right-0 z-20 h-7 flex items-center justify-center px-2 text-[9px] ${
           isDark ? 'bg-dark-100/80 text-gray-500' : 'bg-parchment-100/80 text-gray-400'
         } border-t border-gold-400/10`}>
-          共 {filteredEvents.length} 个事件 · {selectedCountries.length} 个国家
+          共 {filteredEvents.length} 个事件 · {orderedCountries.length} 个国家
         </div>
       </div>
 
@@ -389,7 +499,7 @@ export default function Timeline() {
           </div>
 
           {/* Country rows */}
-          {selectedCountries.map((country) => {
+          {orderedCountries.map((country) => {
             const cDynasties = getCountryDynasties(country.id)
             const cEvents = filteredEvents.filter((e) => e.countryId === country.id)
             const layout = countryLayoutsMap[country.id]
@@ -397,7 +507,17 @@ export default function Timeline() {
             const { dynastyPositions, eventLayouts, labelAreaHeight, totalHeight } = layout
 
             return (
-              <div key={country.id} className="relative" style={{ height: totalHeight }}>
+              <div
+                key={country.id}
+                className="relative"
+                style={{
+                  height: totalHeight,
+                  transform: countryDragId === country.id ? `translateY(${countryDragCurrentY}px)` : undefined,
+                  opacity: countryDragId === country.id ? 0.6 : 1,
+                  zIndex: countryDragId === country.id ? 50 : 1,
+                  transition: countryDragId === country.id ? 'none' : 'transform 0.15s ease, opacity 0.15s ease',
+                }}
+              >
 
                 {/* Band area container */}
                 <div
@@ -407,6 +527,11 @@ export default function Timeline() {
                   onMouseLeave={() => setIsMouseOnBand(false)}
                   data-band-area="true"
                 >
+                  {/* 上边界细线 — 延伸到最左侧，辅助对应国家名称 */}
+                  <div className={`absolute left-0 right-0 top-0 h-px ${isDark ? 'bg-gold-400/25' : 'bg-gold-600/20'}`} />
+
+                  {/* 下边界细线 */}
+                  <div className={`absolute left-0 right-0 bottom-0 h-px ${isDark ? 'bg-gold-400/25' : 'bg-gold-600/20'}`} />
 
                   {/* Dynasty bands */}
                   {cDynasties.map((dynasty) => {
@@ -501,10 +626,10 @@ export default function Timeline() {
                                     left: clampedL,
                                     top: '50%',
                                     transform: 'translate(-50%, -50%)',
-                                    color: bg,
+                                    color: getContrastText(bg),
                                     textShadow: isDyHov
-                                      ? `0 0 8px ${bg}, 0 0 16px ${bg}60`
-                                      : (isDark ? '0 0 3px rgba(0,0,0,0.9)' : '0 0 3px rgba(255,255,255,0.9)'),
+                                      ? `0 0 6px rgba(0,0,0,0.8), 0 1px 2px rgba(0,0,0,0.5)`
+                                      : (isDark ? '0 1px 3px rgba(0,0,0,0.7)' : '0 1px 2px rgba(255,255,255,0.4)'),
                                     letterSpacing: isDyHov ? '1.5px' : '0',
                                   }}
                                 >
@@ -514,12 +639,15 @@ export default function Timeline() {
                             })}
                         </div>
 
-                        {/* Dynasty hover tooltip — 显示在色带下方 */}
+                        {/* Dynasty hover tooltip — 显示在色带下方，可交互 */}
                         {isDyHov && (
-                          <div className="fixed z-[1002] pointer-events-none" style={{
+                          <div className="fixed z-[1002]" style={{
                             left: Math.min(dynastyHoverPos.pageX + 12, window.innerWidth - 220),
                             top: dynastyHoverPos.pageY + 18,
-                          }}>
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          onMouseEnter={() => setHoveredDynastyId(dynasty.id)}
+                          onMouseLeave={() => setHoveredDynastyId(null)}>
                             <div className="px-2.5 py-1.5 rounded-lg shadow-xl border text-xs whitespace-nowrap backdrop-blur-md transition-opacity duration-150" style={{
                               backgroundColor: isDark ? '#1a1a2eee' : '#ffffffee',
                               borderColor: bg + '70',
@@ -531,7 +659,7 @@ export default function Timeline() {
                               <div className="mt-1.5 pt-1 border-t" style={{ borderColor: bg + '25' }}>
                                 <div className="flex items-center gap-1">
                                   <div className="w-2 h-2 rounded-sm" style={{ backgroundColor: bg }} />
-                                  <span className="text-[10px] opacity-65">{country.name}</span>
+                                  <span className="text-[10px] opacity-65">{country.name}{country.isDefunct ? '（-）' : ''}</span>
                                 </div>
                               </div>
                             </div>
@@ -583,11 +711,11 @@ export default function Timeline() {
                           onMouseLeave={handleEventLeave}
                           onClick={() => handleEventClick(event)}
                         >
-                          <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded-[3px] text-[10px] whitespace-nowrap ${isDark ? 'bg-dark-200/90' : 'bg-white/90'} shadow-sm transition-opacity`} style={{ borderColor: cat?.color + '50', opacity: evtHov ? 1 : showFullEventLabels ? 0.95 : 0.75 }}>
+                          <div className={`flex items-center gap-1 px-2 py-1 rounded-[4px] text-[11px] whitespace-nowrap ${isDark ? 'bg-dark-200/90' : 'bg-white/90'} shadow-sm transition-opacity`} style={{ borderColor: cat?.color + '50', opacity: evtHov ? 1 : showFullEventLabels ? 0.95 : 0.75 }}>
                             <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: cat?.color }} />
-                            <span className="font-mono text-[9px] opacity-75">{formatYearShort(event.year)}</span>
-                            <span className="font-medium truncate" style={{ maxWidth: zoom > 0.7 ? 80 : 50 }}>{event.summary}</span>
-                            {bk && <span className="text-yellow-400 text-[8px]">★</span>}
+                            <span className="font-mono text-[10px] opacity-75">{formatYearShort(event.year)}</span>
+                            <span className="font-medium truncate" style={{ maxWidth: zoom > 0.7 ? 100 : 60 }}>{event.summary}</span>
+                            {bk && <span className="text-yellow-400 text-[9px]">★</span>}
                           </div>
                         </div>
                       )
@@ -612,7 +740,10 @@ export default function Timeline() {
         const cd = allDynasties.find((d) => d.id === evt.dynastyId)
         const cc = cat?.color || '#888'
         return (
-          <div className="fixed z-[1000] p-3 rounded-lg shadow-2xl border max-w-xs" style={{ left: Math.min(hoverPosition.pageX + 10, window.innerWidth - 320), top: Math.min(hoverPosition.pageY + 10, window.innerHeight - 200), backgroundColor: isDark ? '#1a1a2e' : '#fff', borderColor: cc + '60', color: isDark ? '#F5F5DC' : '#1a1a1a' }}>
+          <div
+            className="fixed z-[1000] p-3 rounded-lg shadow-2xl border max-w-xs"
+            style={{ left: Math.min(hoverPosition.pageX + 10, window.innerWidth - 320), top: Math.min(hoverPosition.pageY + 10, window.innerHeight - 200), backgroundColor: isDark ? '#1a1a2e' : '#fff', borderColor: cc + '60', color: isDark ? '#F5F5DC' : '#1a1a1a' }}
+          >
             <div className="flex items-start justify-between mb-2">
               <div>
                 <div className="text-sm font-serif font-bold" style={{ color: cc }}>{formatYear(evt.year)}</div>
@@ -625,7 +756,7 @@ export default function Timeline() {
             {cat && <div className="text-[10px] px-1.5 py-0.5 rounded-full mb-1.5 inline-block" style={{ backgroundColor: cc + '25', color: cc }}>{cat.icon} {cat.name}</div>}
             <div className="text-xs font-medium mb-1">{evt.summary}</div>
             <div className="text-[10px] leading-relaxed opacity-70">{evt.detail}</div>
-            {cntry && <div className="text-[9px] mt-1.5 opacity-50">{cntry.name}</div>}
+            {cntry && <div className="text-[9px] mt-1.5 opacity-50">{cntry.name}{cntry.isDefunct ? '（-）' : ''}</div>}
           </div>
         )
       })()}
@@ -650,10 +781,10 @@ export default function Timeline() {
               {cat && <div className="text-xs px-2.5 py-1 rounded-full mb-3 inline-block" style={{ backgroundColor: cc + '25', color: cc }}>{cat.icon} {cat.name}</div>}
               <div className="text-sm leading-relaxed mb-4 opacity-90">{showDetail.detail}</div>
               <div className="flex items-center justify-between pt-3 border-t" style={{ borderColor: cc + '30' }}>
-                {cntry && <div className="text-xs opacity-60">{cntry.name}</div>}
-                <button onClick={() => toggleBookmark(showDetail.id)} className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs transition-colors" style={{ backgroundColor: isBookmapped(showDetail.id) ? cc + '25' : 'rgba(128,128,128,0.15)', color: isBookmapped(showDetail.id) ? cc : undefined }}>
-                  <Bookmark className={`w-3.5 h-3.5 ${isBookmapped(showDetail.id) ? 'fill-current' : ''}`} />
-                  {isBookmapped(showDetail.id) ? '已收藏' : '收藏'}
+                {cntry && <div className="text-xs opacity-60">{cntry.name}{cntry.isDefunct ? '（-）' : ''}</div>}
+                <button onClick={() => toggleBookmark(showDetail.id)} className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs transition-colors" style={{ backgroundColor: isBookmarked(showDetail.id) ? cc + '25' : 'rgba(128,128,128,0.15)', color: isBookmarked(showDetail.id) ? cc : undefined }}>
+                  <Bookmark className={`w-3.5 h-3.5 ${isBookmarked(showDetail.id) ? 'fill-current' : ''}`} />
+                  {isBookmarked(showDetail.id) ? '已收藏' : '收藏'}
                 </button>
               </div>
             </div>
