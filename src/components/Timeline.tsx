@@ -6,7 +6,8 @@ import { events } from '../data/events'
 import { allDynasties } from '../data/dynasties'
 import { eventCategories } from '../data/categories'
 import { continents } from '../data/continents'
-import { Bookmark, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react'
+import { documentEvents, documentCategories } from '../data/documents'
+import { Bookmark, ZoomIn, ZoomOut, Maximize2, BookOpen } from 'lucide-react'
 
 const BOOKMARKS_KEY = 'history_bookmarks'
 function getBookmarks(): string[] {
@@ -39,7 +40,7 @@ const getCountryColor = (countryId: string): string => {
 const ZOOM_LEVELS = { min: 0.15, default: 1, max: 5 }
 
 export default function Timeline() {
-  const { getSelectedCountryIds, selectedRegions } = useRegion()
+  const { getSelectedCountryIds, selectedRegions, selectedDocuments } = useRegion()
   const { isDark } = useTheme()
   const { selectedCategories } = useCategories()
 
@@ -281,24 +282,58 @@ export default function Timeline() {
       zoomTimerRef.current = setTimeout(() => { isZoomingRef.current = false }, 150)
 
       const rect = container.getBoundingClientRect()
-      const mouseX = e.clientX - rect.left + container.scrollLeft
+      const mouseOffsetInViewport = e.clientX - rect.left
       const delta = e.deltaY > 0 ? -0.1 : 0.1
 
       // Compute new zoom clamped to range
       const newZoom = Math.max(ZOOM_LEVELS.min, Math.min(ZOOM_LEVELS.max, zoom + delta))
+      if (newZoom === zoom) return
 
-      // Compute scroll position so time under mouse cursor stays visually fixed
+      // Calculate time at mouse position using current yearWidth (before state update)
+      const currentScrollLeft = container.scrollLeft
+      const mouseX = currentScrollLeft + mouseOffsetInViewport
       const timeAtMouse = timeRange.min + mouseX / yearWidth
-      const newYearWidth = baseYearWidth * newZoom
-      const newMouseX = (timeAtMouse - timeRange.min) * newYearWidth
-      const newScrollLeft = Math.max(0, newMouseX - (e.clientX - rect.left))
 
-      // Update React state AND scroll position synchronously in the same frame
+      // Store the zoom reference and timeAtMouse for useEffect
+      pendingZoomRef.current = { newZoom, timeAtMouse, mouseOffsetInViewport }
+
+      // Update React state (useEffect will handle scroll adjustment after render)
       setZoom(newZoom)
-      container.scrollLeft = newScrollLeft
     }
     // Off band: do NOT call preventDefault → browser naturally scrolls vertically
   }, [isMouseOnBand, zoom, timeRange, yearWidth])
+
+  // === Bind wheel event with passive: false to allow preventDefault ===
+  useEffect(() => {
+    const rc = rightContainerRef.current
+    if (!rc) return
+    rc.addEventListener('wheel', handleWheel, { passive: false })
+    return () => rc.removeEventListener('wheel', handleWheel)
+  }, [handleWheel])
+
+  // Ref to store pending zoom info for useEffect
+  const pendingZoomRef = useRef<{ newZoom: number; timeAtMouse: number; mouseOffsetInViewport: number } | null>(null)
+
+  // === Synchronize scroll position after zoom changes ===
+  // This runs AFTER React re-renders, ensuring DOM width is updated before adjusting scroll
+  useEffect(() => {
+    const pending = pendingZoomRef.current
+    if (!pending || !rightContainerRef.current) return
+
+    const container = rightContainerRef.current
+    const { newZoom, timeAtMouse, mouseOffsetInViewport } = pending
+    pendingZoomRef.current = null
+
+    // Calculate new scroll position to keep timeAtMouse at the same viewport position
+    const newYearWidth = baseYearWidth * newZoom
+    const newMouseX = (timeAtMouse - timeRange.min) * newYearWidth
+    const newScrollLeft = newMouseX - mouseOffsetInViewport
+
+    // Apply scroll position in next frame to ensure DOM is fully updated
+    requestAnimationFrame(() => {
+      container.scrollLeft = Math.max(0, newScrollLeft)
+    })
+  }, [zoom, timeRange])
   const bandHeight = 28
   const labelRowHeight = 26
   const extraGap = 12
@@ -502,7 +537,6 @@ export default function Timeline() {
         onMouseMove={handleDragMove}
         onMouseUp={handleDragEnd}
         onMouseLeave={handleDragEnd}
-        onWheel={handleWheel}
       >
         <div className="relative" style={{ width: Math.max(timelineWidth + 200, 2000), minHeight: '100%' }}>
 
@@ -770,6 +804,150 @@ export default function Timeline() {
                   </div>
                 )}
 
+              </div>
+            )
+          }          )}
+
+
+
+          {/* Document rows (文献色带) */}
+          {/* 每个文档占用独立的高度空间，避免重叠 */}
+          {selectedDocuments.map((doc, docIdx) => {
+            const docEvents = documentEvents.filter((e) => e.documentId === doc.documentId)
+            const docStart = doc.startYear
+            const docEnd = doc.endYear
+            const sx = Math.max(0, getEventPosition(docStart))
+            const ex = getEventPosition(docEnd)
+            const w = ex - sx
+            const isDocHov = hoveredDynastyId === doc.documentId
+            const docZIndex = 100 + docIdx
+
+            return (
+              <div
+                key={doc.documentId}
+                className="relative"
+                style={{
+                  height: bandHeight + 80,
+                  marginTop: docIdx > 0 ? 20 : 0,
+                  transition: isZoomingRef.current ? 'none' : 'transform 0.15s ease, opacity 0.15s ease',
+                  zIndex: docZIndex,
+                }}
+              >
+                {/* Document band */}
+                <div
+                  className="absolute"
+                  style={{ top: 0, left: 0, width: '100%', height: bandHeight }}
+                  onMouseEnter={() => setIsMouseOnBand(true)}
+                  onMouseLeave={() => { setIsMouseOnBand(false); setBandMouseX(0) }}
+                >
+                  {/* Top border */}
+                  <div className={`absolute left-0 right-0 top-0 h-px ${isDark ? 'bg-gold-400/25' : 'bg-gold-600/20'}`} />
+
+                  {/* Band background */}
+                  <div
+                    className={`absolute top-0 h-full ${isZoomingRef.current ? '' : 'transition-all duration-300 ease-out'}`}
+                    style={{
+                      left: sx,
+                      width: Math.max(w, 2),
+                      backgroundColor: `${doc.color}${Math.round((isDocHov ? 0.85 : 0.6) * 255).toString(16).padStart(2, '0')}`,
+                      borderRadius: isDocHov ? '6px' : '4px',
+                      boxShadow: isDocHov ? `0 4px 20px ${doc.color}80` : `0 1px 4px ${doc.color}30`,
+                      zIndex: docZIndex,
+                    }}
+                    onMouseEnter={(e) => { setHoveredDynastyId(doc.documentId); setBandMouseX(e.nativeEvent.offsetX) }}
+                    onMouseMove={(e) => setBandMouseX(e.nativeEvent.offsetX)}
+                    onMouseLeave={() => setHoveredDynastyId(null)}
+                  >
+                    {/* Document label */}
+                    <div
+                      className="absolute inset-0 flex items-center px-3 gap-2"
+                      style={{ color: getContrastText(doc.color), zIndex: docZIndex + 1 }}
+                    >
+                      <BookOpen className="w-3.5 h-3.5 opacity-80" />
+                      <span className="text-xs font-medium">{doc.documentName}</span>
+                      <span className="text-[10px] opacity-70">
+                        {formatYearShort(doc.startYear)} - {formatYearShort(doc.endYear)}
+                      </span>
+                    </div>
+
+                    {/* Shimmer effect */}
+                    <div className="absolute inset-0 overflow-hidden pointer-events-none" style={{ zIndex: docZIndex + 1 }}>
+                      <div
+                        className={`absolute inset-y-0 w-16 ${isZoomingRef.current ? '' : 'transition-opacity duration-300'} ${isDocHov ? 'opacity-100' : 'opacity-0'}`}
+                        style={{
+                          background: `linear-gradient(90deg, transparent, ${doc.color}50, ${doc.color}80, ${doc.color}50, transparent)`,
+                          animation: isDocHov ? 'shimmer 1.8s ease-in-out infinite' : undefined,
+                          filter: 'blur(6px)',
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Bottom border */}
+                  <div className={`absolute left-0 right-0 bottom-0 h-px ${isDark ? 'bg-gold-400/25' : 'bg-gold-600/20'}`} />
+                </div>
+
+                {/* Document event dots */}
+                <div
+                  className="absolute"
+                  style={{ top: bandHeight + 4, left: 0, width: '100%', height: 50 }}
+                >
+                  {docEvents.slice(0, 30).map((evt) => {
+                    const ex = getEventPosition(evt.year)
+                    const cat = getCategory(evt.categoryId)
+                    const evtHov = hoveredEvent === evt.id
+                    const bk = isBookmarked(evt.id)
+                    const dsz = zoom < 0.4 ? 4 : zoom < 0.7 ? 5 : eventDotSize
+
+                    return (
+                      <div
+                        key={evt.id}
+                        className="absolute cursor-pointer"
+                        style={{ left: ex, top: 10, transform: `translate(-50%, 0) ${evtHov ? 'scale(1.5)' : 'scale(1)'}`, zIndex: evtHov ? 100 : docZIndex + 10 }}
+                        onMouseEnter={(e) => handleEventHover(evt.id, e)}
+                        onMouseLeave={handleEventLeave}
+                        onClick={() => handleEventClick(evt)}
+                      >
+                        <div className={`rounded-full shadow-sm ${bk ? 'ring-2 ring-offset-0.5 ring-yellow-400' : ''}`} style={{ width: dsz, height: dsz, backgroundColor: cat?.color || '#888', boxShadow: evtHov ? `0 0 10px ${cat?.color}` : `0 0 3px ${cat?.color}60` }} />
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* Document event labels */}
+                {showEventLabels && docEvents.length > 0 && (
+                  <div
+                    className="absolute"
+                    style={{ top: bandHeight + eventDotSize + dotToLabelGap + 10, left: 0, width: '100%', height: 80 }}
+                  >
+                    {docEvents.map((evt, idx) => {
+                      const ex = getEventPosition(evt.year)
+                      const cat = getCategory(evt.categoryId)
+                      const evtHov = hoveredEvent === evt.id
+                      const bk = isBookmarked(evt.id)
+                      // 3 rows循环
+                      const row = idx % 3
+
+                      return (
+                        <div
+                          key={evt.id}
+                          className="absolute cursor-pointer"
+                          style={{ left: ex, top: row * labelRowHeight, transform: `translate(-50%, 0) ${evtHov ? 'scale(1.05)' : 'scale(1)'}`, zIndex: evtHov ? 100 : docZIndex + 5 }}
+                          onMouseEnter={(e) => handleEventHover(evt.id, e)}
+                          onMouseLeave={handleEventLeave}
+                          onClick={() => handleEventClick(evt)}
+                        >
+                          <div className={`flex items-center gap-1 px-2 py-1 rounded-[4px] text-[11px] whitespace-nowrap ${isDark ? 'bg-dark-200/90' : 'bg-white/90'} shadow-sm ${isZoomingRef.current ? '' : 'transition-opacity'}`} style={{ borderColor: (doc.color) + '50', opacity: evtHov ? 1 : showFullEventLabels ? 0.95 : 0.75 }}>
+                            <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: cat?.color || '#888' }} />
+                            <span className="font-mono text-[10px] opacity-75">{formatYearShort(evt.year)}</span>
+                            <span className="font-medium truncate" style={{ maxWidth: zoom > 0.7 ? 100 : 60 }}>{evt.summary}</span>
+                            {bk && <span className="text-yellow-400 text-[9px]">★</span>}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
             )
           })}

@@ -22,6 +22,16 @@ export interface Continent {
   countries: Country[]
 }
 
+// 文献分类（用于专题展示，如春秋战国）
+export interface DocumentCategory {
+  id: string
+  name: string
+  startYear: number  // 起始年份
+  endYear: number    // 结束年份
+  color: string      // 背景色
+  summary: string    // 简要描述
+}
+
 // 朝代信息
 export interface Dynasty {
   id: string
@@ -52,12 +62,22 @@ export interface HistoryEvent {
   continentId: string
   categoryId: string    // 事件分类ID
   dynastyId?: string     // 朝代ID（可选，用于中国等有朝代的国家）
+  documentId?: string    // 文献ID（可选，用于专题事件如春秋战国）
 }
 
 export interface SelectedContinent {
   continentId: string
   continentName: string
   countries: SelectedCountry[]
+}
+
+// 文献条目（选中的专题）
+export interface SelectedDocument {
+  documentId: string
+  documentName: string
+  startYear: number
+  endYear: number
+  color: string
 }
 
 export interface SelectedCountry {

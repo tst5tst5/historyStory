@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext'
 import { useTheme } from '../context/ThemeContext'
 import {
   BookOpen, Search, Monitor, Sun, Moon, Bookmark,
-  LogOut, User, Globe, Plus,
+  LogOut, User, Plus,
 } from 'lucide-react'
 
 interface ToolbarProps {
@@ -36,9 +36,9 @@ export default function Toolbar({
             onClick={onOpenAddRegion}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gold-400/40 text-gold-400 text-sm font-medium hover:bg-gold-400/10 hover:border-gold-400/60 hover:shadow-[0_0_15px_rgba(201,169,110,0.2)] transition-all duration-300 active:scale-95"
           >
-            <Globe className="w-4 h-4" />
+            <BookOpen className="w-4 h-4" />
             <Plus className="w-3 h-3" />
-            <span>添加区域</span>
+            <span>添加事件</span>
           </button>
         </div>
 
